@@ -201,7 +201,7 @@ model = AttentionModel()
 # checkpoint_path = 'trained_models(heads_4)/train-runs-22/latest_Att-CNN-LSTM_model_22.pt'
 # model.load_state_dict(torch.load(checkpoint_path))
 # model = model.to(device)
-print('Model loaded from', checkpoint_path)
+# print('Model loaded from', checkpoint_path)
 #####################################################
 
 criterion = RMSLoss()
