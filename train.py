@@ -84,23 +84,24 @@ class NO2Dataset(Dataset):
         # Extract the relevant features and convert to tensors
         features_tensor = torch.tensor(past_data[['LST', 'AAI', 'CloudFraction', 'Precipitation', 
                                                   'NO2_strat', 'NO2_total', 'NO2_trop', 
-                                                  'TropopausePressure']].values, dtype=torch.float32)
-        lat = torch.tensor(past_data['LAT'].values[0], dtype=torch.float32)  # Only one LAT value
-        lon = torch.tensor(past_data['LON'].values[0], dtype=torch.float32)  # Only one LON value
+                                                  'TropopausePressure', 'LAT', 'LON']].values, dtype=torch.float32)
+        # lat = torch.tensor(past_data['LAT'].values[0], dtype=torch.float32)  # Only one LAT value
+        # lon = torch.tensor(past_data['LON'].values[0], dtype=torch.float32)  # Only one LON value
         gt = torch.tensor(gt_value[0], dtype=torch.float32)
         # Return the feature tensor, lat/lon, and ground truth
-        return features_tensor, lat, lon, gt
+        # return features_tensor, lat, lon, gt
+        return features_tensor, gt
 
 
 def collate_fn(batch):
-    features, latitudes, longitudes, ground_truths = zip(*batch)
+    features, ground_truths = zip(*batch)
 
     features_padded = pad_sequence(features, batch_first=True)  # (batch_size, max_seq_len, num_features)
     ground_truths_padded = torch.stack(ground_truths, dim=0)  # (batch_size,) 
-    lat_batch = torch.stack(latitudes, dim=0)  # (batch_size,)
-    lon_batch = torch.stack(longitudes, dim=0)  # (batch_size,)
+    # lat_batch = torch.stack(latitudes, dim=0)  # (batch_size,)
+    # lon_batch = torch.stack(longitudes, dim=0)  # (batch_size,)
 
-    return features_padded, lat_batch, lon_batch, ground_truths_padded
+    return features_padded, ground_truths_padded
 
 
 class RMSLoss(nn.Module):
@@ -121,13 +122,13 @@ def train_one_epoch(epoch_index, model, criterion, optimizer):
     running_loss = 0.0
     batch_losses = []
 
-    for i, (features_seq, lat, lon, gt) in enumerate(train_loader):
-        features_seq, lat, lon, gt = features_seq.to(device), lat.to(device), lon.to(device), gt.to(device)
+    for i, (features_seq, gt) in enumerate(train_loader):
+        features_seq, gt = features_seq.to(device), gt.to(device)
 
         optimizer.zero_grad()
 
         # Forward pass
-        outputs = model(features_seq, lat, lon)
+        outputs = model(features_seq)
         loss = criterion(outputs.squeeze(), gt)
 
         # if (i+1) % 25 == 0:
@@ -158,11 +159,11 @@ def validate_one_epoch(epoch_index, model, criterion, scheduler):
     all_gts = []
 
     with torch.no_grad():
-        for i, (features_seq, lat, lon, gt) in enumerate(val_loader):
+        for i, (features_seq, gt) in enumerate(val_loader):
             # Move data to GPU
-            features_seq, lat, lon, gt = features_seq.to(device), lat.to(device), lon.to(device), gt.to(device)
+            features_seq, gt = features_seq.to(device), gt.to(device)
 
-            val_outputs = model(features_seq, lat, lon)
+            val_outputs = model(features_seq)
             loss = criterion(val_outputs.squeeze(), gt)
             val_loss += loss.item()
 
@@ -172,7 +173,14 @@ def validate_one_epoch(epoch_index, model, criterion, scheduler):
             all_preds.append(val_outputs.squeeze().cpu().numpy())
             all_gts.append(gt.cpu().numpy())
         
-        scheduler.step(val_loss)
+    # Step the scheduler and check if learning rate changed
+    prev_lr = optimizer.param_groups[0]['lr']
+    scheduler.step(val_loss)
+    new_lr = optimizer.param_groups[0]['lr']
+
+    # Print learning rate change
+    if new_lr != prev_lr:
+        print(f'NOTE: Learning rate changed from {prev_lr:.6f} to {new_lr:.6f}')
 
     all_preds = np.concatenate(all_preds)
     all_gts = np.concatenate(all_gts)
@@ -205,8 +213,9 @@ model = AttentionModel()
 #####################################################
 
 criterion = RMSLoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=0.1)
-scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=5, verbose=True)
+optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=5, verbose=True)
+
 
 
 

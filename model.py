@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class AttentionModel(nn.Module):
-    def __init__(self, feature_dims=8, time_steps=15, lstm_units=64, num_heads=4):
+    def __init__(self, feature_dims=10, time_steps=15, lstm_units=64, num_heads=4):
         super(AttentionModel, self).__init__()
         
         # Conv1D equivalent in PyTorch
@@ -21,11 +21,11 @@ class AttentionModel(nn.Module):
         self.attention_block = AttentionBlock(input_dim=2*lstm_units, time_steps=time_steps, single_attention_vector=True, num_heads=num_heads)
         self.fc1 = nn.Linear(lstm_units*2, lstm_units)  # lstm_units * 2 because it's bidirectional
         self.bn1 = nn.BatchNorm1d(lstm_units)
-        self.fc2 = nn.Linear(lstm_units+2, 8)
+        self.fc2 = nn.Linear(lstm_units, 8)
         self.bn2 = nn.BatchNorm1d(8)            
         self.fc3 = nn.Linear(8, 1)
 
-    def forward(self, features, lat, lon):
+    def forward(self, features):
         x = features.permute(0, 2, 1)  # Rearrange to (batch_size, INPUT_DIMS, TIME_STEPS)
         x = F.relu(self.conv1d(x))
         x = self.dropout(x)
@@ -42,8 +42,6 @@ class AttentionModel(nn.Module):
         att_pooled, _ = torch.max(attention_out, dim=1)
 
         output = torch.sigmoid(self.bn1(self.fc1(att_pooled)))
-
-        output = torch.cat((output, lat.unsqueeze(1), lon.unsqueeze(1)), dim=1)
 
         output = torch.sigmoid(self.bn2(self.fc2(output))) # Take the last time step
 
