@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class AttentionModel(nn.Module):
-    def __init__(self, feature_dims=10, time_steps=15, lstm_units=64, num_heads=4):
+    def __init__(self, feature_dims=10, time_steps=15, lstm_units=128, num_heads=8):
         super(AttentionModel, self).__init__()
         
         # Conv1D equivalent in PyTorch

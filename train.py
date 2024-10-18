@@ -151,7 +151,7 @@ def train_one_epoch(epoch_index, model, criterion, optimizer):
     return batch_losses
 
 
-def validate_one_epoch(epoch_index, model, criterion, scheduler):
+def validate_one_epoch(epoch_index, model, criterion):
     model.eval()  
     model.to(device)  
     val_loss = 0.0
@@ -172,15 +172,6 @@ def validate_one_epoch(epoch_index, model, criterion, scheduler):
             # Collect predictions and ground truths for RMSE calculation
             all_preds.append(val_outputs.squeeze().cpu().numpy())
             all_gts.append(gt.cpu().numpy())
-        
-    # Step the scheduler and check if learning rate changed
-    prev_lr = optimizer.param_groups[0]['lr']
-    scheduler.step(val_loss)
-    new_lr = optimizer.param_groups[0]['lr']
-
-    # Print learning rate change
-    if new_lr != prev_lr:
-        print(f'NOTE: Learning rate changed from {prev_lr:.6f} to {new_lr:.6f}')
 
     all_preds = np.concatenate(all_preds)
     all_gts = np.concatenate(all_gts)
@@ -210,13 +201,11 @@ model = AttentionModel()
 # checkpoint_path = 'trained_models(heads_4)/train-runs-22/latest_Att-CNN-LSTM_model_22.pt'
 # model.load_state_dict(torch.load(checkpoint_path))
 # model = model.to(device)
+print('Model loaded from', checkpoint_path)
 #####################################################
 
 criterion = RMSLoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=5, verbose=True)
-
-
+optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-3)
 
 
 num_epochs = 50
@@ -233,18 +222,18 @@ for epoch in tqdm(range(1, num_epochs + 1)):
     print(f'||||||||||||||||||||||||Epoch {epoch} Training Completed.||||||||||||||||||||||||')
 
     # Validate after each epoch
-    avg_val_loss = validate_one_epoch(epoch, model, criterion, scheduler)  
+    avg_val_loss = validate_one_epoch(epoch, model, criterion)  
     all_val_losses.append(avg_val_loss)
     print(f"Validation Loss for {epoch}: ", avg_val_loss)
 
     # Save the last model
-    torch.save(model.state_dict(), './trained_models(heads_4)/train-runs-22/latest_Att-CNN-LSTM_model_22.pt')
+    torch.save(model.state_dict(), './trained_models(heads_8)/train-runs-22/latest_Att-CNN-LSTM_model_22.pt')
     print(f'Latest Model Saved {epoch}')
 
     # Save the model if it has the best validation loss so far
     if avg_val_loss < best_val_loss:
         best_val_loss = avg_val_loss
-        torch.save(model.state_dict(), './trained_models(heads_4)/train-runs-22/best_Att-CNN-LSTM_model_22.pt')
+        torch.save(model.state_dict(), './trained_models(heads_8)/train-runs-22/best_Att-CNN-LSTM_model_22.pt')
         print(f'Model saved at epoch {epoch} with validation RMSE {best_val_loss:.4f}')
 
 
