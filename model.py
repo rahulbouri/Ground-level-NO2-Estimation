@@ -26,10 +26,9 @@ class AttentionModel(nn.Module):
         self.bn1 = nn.BatchNorm1d(lstm_units)
         self.fc2 = nn.Linear(lstm_units, 8)
         self.bn2 = nn.BatchNorm1d(8)            
-
+        self.fc3 = nn.Linear(8, 1)
 
     def forward(self, features):
-
         x = features.permute(0, 2, 1)  # Rearrange to (batch_size, INPUT_DIMS, TIME_STEPS)
         x = F.relu(self.conv1d(x))
         x = self.dropout(x)
@@ -47,10 +46,12 @@ class AttentionModel(nn.Module):
 
         output = torch.sigmoid(self.bn1(self.fc1(att_pooled)))
 
-        output = torch.sigmoid(self.bn2(self.fc2(output))) 
+        output = torch.sigmoid(self.bn2(self.fc2(output)))
+
+        output = self.fc3(output)
         
         return output
-
+    
 
 class AttentionBlock(nn.Module):
     def __init__(self, input_dim, time_steps, single_attention_vector=False, num_heads=8):
@@ -87,17 +88,16 @@ class AttentionBlock(nn.Module):
 
 
 class XGBoostModel:
-    def __init__(self,best_loss, model_save_path="xgboost-weights/best_xgboost_model.json"):
+    def __init__(self,best_loss = float('inf'), model_save_path="xgboost-weights/best_xgboost_model.json"):
         self.model = xgb.XGBRegressor(
             objective='reg:squarederror',
-            n_estimators=100,  # Set n_estimators to 100
-            max_depth=5        # Set max_depth to 5
+            n_estimators=1000,  # Set n_estimators to 100
+            max_depth=10        # Set max_depth to 5
         )
         self.best_loss = best_loss
         self.model_save_path = model_save_path
     
     def fit(self, input_np: np.ndarray, target_np: np.ndarray):
-        assert input_np.shape[1] == 8, "Input tensor must have shape (batch_size, 8)"
 
         self.model.fit(input_np, target_np)
 
@@ -106,19 +106,20 @@ class XGBoostModel:
     def inference(self, input_tensor: torch.Tensor):
         self.model.load_model(self.model_save_path)
 
-        assert input_tensor.shape[1] == 8, "Input tensor must have shape (batch_size, 8)"
-        
-        if input_tensor.is_cuda:
-            device = input_tensor.device
-            input_np = input_tensor.detach().cpu().numpy()
+        if isinstance(input_tensor, torch.Tensor):
+            if input_tensor.is_cuda:
+                device = input_tensor.device
+                input_np = input_tensor.detach().cpu().numpy()
+            else:
+                device = input_tensor.device
+                input_np = input_tensor.detach().numpy()
         else:
-            device = input_tensor.device
-            input_np = input_tensor.detach().numpy()
+            input_np = input_tensor
         
         predictions = self.model.predict(input_np)
-        predictions_tensor = torch.tensor(predictions, dtype=torch.float32, device=device, requires_grad=True)
+        # predictions_tensor = torch.from_numpy(predictions).float()
     
-        return predictions_tensor
+        return predictions
     
     def save_model(self):
         self.model.save_model(self.model_save_path)

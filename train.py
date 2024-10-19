@@ -78,26 +78,30 @@ class NO2Dataset(Dataset):
 
         # Sort past data again (optional) to ensure order
         past_data = past_data.sort_values(by='Date').reset_index(drop=True)
+        
 
         gt_value = loc_data[loc_data['Date'] == current_date]['GT_NO2'].values
 
         # Extract the relevant features and convert to tensors
-        features_tensor = torch.tensor(past_data[['LST', 'AAI', 'CloudFraction', 'Precipitation', 
-                                                  'NO2_strat', 'NO2_total', 'NO2_trop', 
-                                                  'TropopausePressure', 'LAT', 'LON']].values, dtype=torch.float32)
+        features_tensor = torch.tensor(past_data[['LST', 'AAI', 'CloudFraction', 'Precipitation',  
+                                                  'TropopausePressure', 'LAT', 'LON', 'NO2_strat', 'NO2_total', 'NO2_trop']].values, dtype=torch.float32)
 
         gt = torch.tensor(gt_value[0], dtype=torch.float32)
 
-        return features_tensor, gt
+        xg = torch.tensor(loc_data[loc_data['Date'] == current_date][['LST', 'AAI', 'CloudFraction', 'Precipitation',  
+                                                  'TropopausePressure', 'LAT', 'LON', 'NO2_strat', 'NO2_total', 'NO2_trop']].values[0], dtype=torch.float32)
+
+        return features_tensor, xg, gt
 
 
 def collate_fn(batch):
-    features, ground_truths = zip(*batch)
+    features, xg, ground_truths = zip(*batch)
 
     features_padded = pad_sequence(features, batch_first=True)  # (batch_size, max_seq_len, num_features)
+    xg_padded = torch.stack(xg, dim=0)  
     ground_truths_padded = torch.stack(ground_truths, dim=0)  # (batch_size,) 
 
-    return features_padded, ground_truths_padded
+    return features_padded, xg_padded, ground_truths_padded
 
 
 class RMSLoss(nn.Module):
@@ -112,41 +116,37 @@ class RMSLoss(nn.Module):
         return rms
     
 
-def train_one_epoch(epoch_index, model, xgb, criterion, optimizer):
+def train_one_epoch(epoch_index, model, criterion, optimizer):
     model.train()  
     model.to(device) 
     running_loss = 0.0
-    losses = []
     batch_losses = []
+    losses = []
 
-    all_outputs = []
-    all_gts = [] 
+    xg_features = []
+    all_preds = []
+    all_gts = []
 
-    for i, (features_seq, gt) in enumerate(train_loader):
-        features_seq, gt = features_seq.to(device), gt.to(device)
+    for i, (features_seq, xg, gt) in enumerate(train_loader):
+        features_seq, xg, gt = features_seq.to(device), xg.to(device), gt.to(device)
 
         optimizer.zero_grad()
 
         # Forward pass
         outputs = model(features_seq)
+        loss = criterion(outputs.squeeze(), gt)
 
-        if device:
-            all_outputs.append(outputs.detach().cpu().numpy()) 
-            all_gts.append(gt.detach().cpu().numpy()) 
-        else:
-            all_outputs.append(outputs.detach().numpy())
-            all_gts.append(gt.detach().numpy())
+        xg_features.append(xg.detach().to('cpu').numpy())
+        all_preds.append(outputs.detach().to('cpu').numpy())
+        all_gts.append(gt.detach().to('cpu').numpy())
 
-        predictions = xgb.inference(outputs)
-        loss = criterion(predictions, gt)
 
         # Backward pass and optimization
         loss.backward()
         optimizer.step()
 
-        losses.append(loss.item())
-
         running_loss += loss.item()
+        losses.append(loss.item())
         print(f'Epoch {epoch_index}, Batch {i + 1}, Loss: {loss.item():.4f}')
 
         if (i+1) % 100 == 0:
@@ -155,45 +155,50 @@ def train_one_epoch(epoch_index, model, xgb, criterion, optimizer):
             batch_losses.append(last_loss)
             running_loss = 0.0
     
-    all_outputs = np.concatenate(all_outputs)
-    all_gts = np.concatenate(all_gts)
+    all_preds = np.concatenate(all_preds)
+    xg_features = np.concatenate(xg_features)
+    
 
-    print("||||||||||||||||||||||||Training XGBoost model||||||||||||||||||||||||")
-    xgb.fit(all_outputs, all_gts)
+    x_xgb = np.concatenate((xg_features, all_preds), axis=1)
+    y_xgb = np.concatenate(all_gts)
 
-    return losses
+    return losses, x_xgb, y_xgb
 
 
-def validate_one_epoch(epoch_index, model, xgb, criterion):
+def validate_one_epoch(epoch_index, model, criterion):
     model.eval()  
     model.to(device)  
     val_loss = 0.0
+    losses = []
+
+    xg_features = []
     all_preds = []
     all_gts = []
 
     with torch.no_grad():
-        for i, (features_seq, gt) in enumerate(val_loader):
+        for i, (features_seq, xg, gt) in enumerate(val_loader):
             # Move data to GPU
-            features_seq, gt = features_seq.to(device), gt.to(device)
+            features_seq, xg, gt = features_seq.to(device), xg.to(device), gt.to(device)
 
-            outputs = model(features_seq)
-            predicitions = xgb.inference(outputs)
-            loss = criterion(predicitions, gt)
+            val_outputs = model(features_seq)
+            loss = criterion(val_outputs.squeeze(), gt)
             val_loss += loss.item()
+
+            losses.append(loss.item())
 
             print(f'Epoch {epoch_index}, Batch {i + 1}, Loss: {loss.item():.4f}')
 
-            # Collect predictions and ground truths for RMSE calculation
-            all_preds.append(predicitions.cpu().numpy())
-            all_gts.append(gt.cpu().numpy())
+            xg_features.append(xg.detach().to('cpu').numpy())
+            all_preds.append(val_outputs.detach().to('cpu').numpy())
+            all_gts.append(gt.detach().to('cpu').numpy())
 
+    xg_features = np.concatenate(xg_features)
     all_preds = np.concatenate(all_preds)
-    all_gts = np.concatenate(all_gts)
-    val_rmse = np.sqrt(np.mean((all_preds - all_gts) ** 2))
 
-    print(f'Epoch {epoch_index}, Validation RMSE: {val_rmse:.4f}')
-
-    return val_loss/len(val_loader)
+    x_xgb = np.concatenate((xg_features, all_preds), axis=1)
+    y_xgb = np.concatenate(all_gts)
+    
+    return losses, x_xgb, y_xgb
 
 
 dataset = pd.read_csv('Train_Cleaned_KNN_Filtered.csv')
@@ -234,31 +239,39 @@ xgb = XGBoostModel(best_val_loss)
 
 for epoch in tqdm(range(1, num_epochs + 1)):
 
-    # Train for one epoch
-    train_losses = train_one_epoch(epoch, model, xgb, criterion, optimizer)
-    all_train_losses.extend(train_losses)
-    print(f'||||||||||||||||||||||||Epoch {epoch} Training Completed. [Saved data for xgb model training] ||||||||||||||||||||||||')
+    train_losses, input_xgb, output_xgb = train_one_epoch(epoch, model, criterion, optimizer)
 
+    print(f"Average Training Loss for {epoch}: ", sum(train_losses)/len(train_losses))
+
+    xgb.fit(input_xgb, output_xgb)
     if epoch == 1:
         xgb.save_model()
 
-    # Validate after each epoch
-    avg_val_loss = validate_one_epoch(epoch, model, xgb, criterion)  
-    all_val_losses.append(avg_val_loss)
-    print(f"Validation Loss for {epoch}: ", avg_val_loss)
+    prediction = xgb.inference(input_xgb)
+    
+    all_train_losses.extend(train_losses)
+    print(f'||||||||||||||||||||||||Epoch {epoch} Training Completed.||||||||||||||||||||||||')
 
-    # Save the last model
+    # Validate after each epoch
+    val_losses, input_xgb, output_xgb = validate_one_epoch(epoch, model, criterion)  
+    all_val_losses.extend(val_losses)
+    print(f"Average Validation Loss for {epoch}: ", sum(val_losses)/len(val_losses))
+
+    prediction = xgb.inference(input_xgb)
+
+    val_rmse = np.sqrt(np.mean((prediction - output_xgb) ** 2))
+
+    if val_rmse < best_val_loss:
+        xgb.save_model()
+        torch.save(model.state_dict(), './trained-model-xgboost/best_Att-CNN-LSTM_model_22.pt')
+        print(f'Best Model saved at epoch {epoch} with validation RMSE {val_rmse:.4f}')
+        best_val_loss = val_rmse
+    else:
+        print(f'Validation RMSE: {val_rmse:.4f}')
+    
+    # Save the latest model
     torch.save(model.state_dict(), './trained-model-xgboost/latest_Att-CNN-LSTM_model_22.pt')
     print(f'Latest Model Saved {epoch}')
-
-    # Save the model if it has the best validation loss so far
-    if avg_val_loss < best_val_loss:
-        best_val_loss = avg_val_loss
-        torch.save(model.state_dict(), './trained-model-xgboost/best_Att-CNN-LSTM_model_22.pt')
-        xgb.save_model()
-        print(f'Model saved at epoch {epoch} with validation RMSE {best_val_loss:.4f}')
-    
-    # scheduler.step()
 
 
 plt.figure()
