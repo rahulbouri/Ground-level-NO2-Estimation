@@ -85,23 +85,28 @@ class NO2Dataset(Dataset):
         features_tensor = torch.tensor(past_data[['LST', 'AAI', 'CloudFraction', 'Precipitation', 
                                                   'NO2_strat', 'NO2_total', 'NO2_trop', 
                                                   'TropopausePressure', 'LAT', 'LON']].values, dtype=torch.float32)
+        
+        features_xg__tensor = torch.tensor(past_data[['LST', 'AAI', 'CloudFraction', 'Precipitation', 
+                                                  'NO2_strat', 'NO2_total', 'NO2_trop', 
+                                                  'TropopausePressure', 'LAT', 'LON', 'GT_NO2']].values, dtype=torch.float32)
         # lat = torch.tensor(past_data['LAT'].values[0], dtype=torch.float32)  # Only one LAT value
         # lon = torch.tensor(past_data['LON'].values[0], dtype=torch.float32)  # Only one LON value
         gt = torch.tensor(gt_value[0], dtype=torch.float32)
         # Return the feature tensor, lat/lon, and ground truth
         # return features_tensor, lat, lon, gt
-        return features_tensor, gt
+        return features_tensor, features_xg__tensor, gt
 
 
 def collate_fn(batch):
-    features, ground_truths = zip(*batch)
+    features, features_xg, ground_truths = zip(*batch)
 
     features_padded = pad_sequence(features, batch_first=True)  # (batch_size, max_seq_len, num_features)
+    features_xg_padded = pad_sequence(features_xg, batch_first=True)  # (batch_size, max_seq_len, num_features)
     ground_truths_padded = torch.stack(ground_truths, dim=0)  # (batch_size,) 
     # lat_batch = torch.stack(latitudes, dim=0)  # (batch_size,)
     # lon_batch = torch.stack(longitudes, dim=0)  # (batch_size,)
 
-    return features_padded, ground_truths_padded
+    return features_padded, features_xg_padded, ground_truths_padded
 
 
 class RMSLoss(nn.Module):
@@ -122,13 +127,13 @@ def train_one_epoch(epoch_index, model, criterion, optimizer):
     running_loss = 0.0
     batch_losses = []
 
-    for i, (features_seq, gt) in enumerate(train_loader):
-        features_seq, gt = features_seq.to(device), gt.to(device)
+    for i, (features_seq, features_xg, gt) in enumerate(train_loader):
+        features_seq, features_xg, gt = features_seq.to(device), features_xg.to(device), gt.to(device)
 
         optimizer.zero_grad()
 
         # Forward pass
-        outputs = model(features_seq)
+        outputs = model(features_seq, features_xg)
         loss = criterion(outputs.squeeze(), gt)
 
         # if (i+1) % 25 == 0:
@@ -159,11 +164,11 @@ def validate_one_epoch(epoch_index, model, criterion):
     all_gts = []
 
     with torch.no_grad():
-        for i, (features_seq, gt) in enumerate(val_loader):
+        for i, (features_seq,features_xg,  gt) in enumerate(val_loader):
             # Move data to GPU
-            features_seq, gt = features_seq.to(device), gt.to(device)
+            features_seq, features_xg, gt = features_seq.to(device), features_xg.to(device), gt.to(device)
 
-            val_outputs = model(features_seq)
+            val_outputs = model(features_seq, features_xg)
             loss = criterion(val_outputs.squeeze(), gt)
             val_loss += loss.item()
 
@@ -198,17 +203,19 @@ val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=True, collat
 model = AttentionModel()
 
 # Load the saved model weights from a local file (replace 'model_weights.pth' with your filename)
-# checkpoint_path = 'trained_models(heads_4)/train-runs-22/latest_Att-CNN-LSTM_model_22.pt'
-# model.load_state_dict(torch.load(checkpoint_path))
-# model = model.to(device)
-# print('Model loaded from', checkpoint_path)
+checkpoint_path = 'trained-model-xgboost/best_Att-CNN-LSTM_model_22.pt'
+model.load_state_dict(torch.load(checkpoint_path))
+model = model.to(device)
+print('Model loaded from', checkpoint_path)
 #####################################################
 
 criterion = RMSLoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-3)
+# scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
 
 
-num_epochs = 50
+
+num_epochs = 20
 best_val_loss = float('inf')
 
 all_train_losses = []
@@ -227,21 +234,23 @@ for epoch in tqdm(range(1, num_epochs + 1)):
     print(f"Validation Loss for {epoch}: ", avg_val_loss)
 
     # Save the last model
-    torch.save(model.state_dict(), './trained_models(heads_8)/train-runs-22/latest_Att-CNN-LSTM_model_22.pt')
+    torch.save(model.state_dict(), './trained-model-xgboost/latest_Att-CNN-LSTM_model_22.pt')
     print(f'Latest Model Saved {epoch}')
 
     # Save the model if it has the best validation loss so far
     if avg_val_loss < best_val_loss:
         best_val_loss = avg_val_loss
-        torch.save(model.state_dict(), './trained_models(heads_8)/train-runs-22/best_Att-CNN-LSTM_model_22.pt')
+        torch.save(model.state_dict(), './trained-model-xgboost/best_Att-CNN-LSTM_model_22.pt')
         print(f'Model saved at epoch {epoch} with validation RMSE {best_val_loss:.4f}')
+    
+    # scheduler.step()
 
 
 plt.figure()
 plt.plot(all_train_losses, label='Training Loss')
 plt.plot(all_val_losses, label='Validation Loss')
-plt.xlabel('Batch (x100)')
+plt.xlabel('Batch')
 plt.ylabel('Loss')
-plt.title('Training Loss per 100 Batches')
+plt.title('Loss per Epoch')
 plt.legend()
 plt.show()

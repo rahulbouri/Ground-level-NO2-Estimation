@@ -2,6 +2,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import xgboost as xgb
+import numpy as np
+
 class AttentionModel(nn.Module):
     def __init__(self, feature_dims=10, time_steps=15, lstm_units=128, num_heads=8):
         super(AttentionModel, self).__init__()
@@ -24,8 +27,13 @@ class AttentionModel(nn.Module):
         self.fc2 = nn.Linear(lstm_units, 8)
         self.bn2 = nn.BatchNorm1d(8)            
         self.fc3 = nn.Linear(8, 1)
+        self.final = nn.Linear(2, 1)
 
-    def forward(self, features):
+
+    def forward(self, features, features_xg):
+
+        y_xgb = train_and_predict_xgboost(features_xg)
+
         x = features.permute(0, 2, 1)  # Rearrange to (batch_size, INPUT_DIMS, TIME_STEPS)
         x = F.relu(self.conv1d(x))
         x = self.dropout(x)
@@ -43,9 +51,13 @@ class AttentionModel(nn.Module):
 
         output = torch.sigmoid(self.bn1(self.fc1(att_pooled)))
 
-        output = torch.sigmoid(self.bn2(self.fc2(output))) # Take the last time step
+        output = torch.sigmoid(self.bn2(self.fc2(output))) 
 
-        output = self.fc3(output) #TDODO: check attention model
+        output = self.fc3(output) 
+
+        output = torch.cat((output, y_xgb.unsqueeze(1)), dim=1)
+
+        output = self.final(output)
         
         return output
 
@@ -83,3 +95,34 @@ class AttentionBlock(nn.Module):
 
         return output_attention_mul
 
+
+def train_and_predict_xgboost(xg_f):
+    if xg_f.is_cuda:
+        device = xg_f.device
+        xg_f = xg_f.detach().cpu().numpy()
+    else:
+        device = xg_f.device
+        xg_f = xg_f.detach().numpy()
+
+    X_train = xg_f[:, :-1, :-1].reshape(-1, xg_f.shape[-1] - 1)
+    y_train = xg_f[:, :-1, -1].flatten()
+
+    dtrain = xgb.DMatrix(X_train, label=y_train)
+
+    params = {
+        'objective': 'reg:squarederror',
+        'eval_metric': 'rmse',
+        'max_depth': 3,
+        'learning_rate': 0.1,
+    }
+
+    model = xgb.train(params, dtrain)
+
+    predictions = []
+    for row in xg_f[:, -1, :-1]:
+        prediction = model.predict(xgb.DMatrix(row.reshape(1, -1)))
+        predictions.append(prediction[0])
+
+    predictions_tensor = torch.tensor(predictions, dtype=torch.float32).to(device)
+
+    return predictions_tensor
