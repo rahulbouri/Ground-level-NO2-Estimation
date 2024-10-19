@@ -26,13 +26,9 @@ class AttentionModel(nn.Module):
         self.bn1 = nn.BatchNorm1d(lstm_units)
         self.fc2 = nn.Linear(lstm_units, 8)
         self.bn2 = nn.BatchNorm1d(8)            
-        self.fc3 = nn.Linear(8, 1)
-        self.final = nn.Linear(2, 1)
 
 
-    def forward(self, features, features_xg):
-
-        y_xgb = train_and_predict_xgboost(features_xg)
+    def forward(self, features):
 
         x = features.permute(0, 2, 1)  # Rearrange to (batch_size, INPUT_DIMS, TIME_STEPS)
         x = F.relu(self.conv1d(x))
@@ -52,12 +48,6 @@ class AttentionModel(nn.Module):
         output = torch.sigmoid(self.bn1(self.fc1(att_pooled)))
 
         output = torch.sigmoid(self.bn2(self.fc2(output))) 
-
-        output = self.fc3(output) 
-
-        output = torch.cat((output, y_xgb.unsqueeze(1)), dim=1)
-
-        output = self.final(output)
         
         return output
 
@@ -96,33 +86,41 @@ class AttentionBlock(nn.Module):
         return output_attention_mul
 
 
-def train_and_predict_xgboost(xg_f):
-    if xg_f.is_cuda:
-        device = xg_f.device
-        xg_f = xg_f.detach().cpu().numpy()
-    else:
-        device = xg_f.device
-        xg_f = xg_f.detach().numpy()
+class XGBoostModel:
+    def __init__(self,best_loss, model_save_path="xgboost-weights/best_xgboost_model.json"):
+        self.model = xgb.XGBRegressor(
+            objective='reg:squarederror',
+            n_estimators=100,  # Set n_estimators to 100
+            max_depth=5        # Set max_depth to 5
+        )
+        self.best_loss = best_loss
+        self.model_save_path = model_save_path
+    
+    def fit(self, input_np: np.ndarray, target_np: np.ndarray):
+        assert input_np.shape[1] == 8, "Input tensor must have shape (batch_size, 8)"
 
-    X_train = xg_f[:, :-1, :-1].reshape(-1, xg_f.shape[-1] - 1)
-    y_train = xg_f[:, :-1, -1].flatten()
+        self.model.fit(input_np, target_np)
 
-    dtrain = xgb.DMatrix(X_train, label=y_train)
+        return None
+    
+    def inference(self, input_tensor: torch.Tensor):
+        self.model.load_model(self.model_save_path)
 
-    params = {
-        'objective': 'reg:squarederror',
-        'eval_metric': 'rmse',
-        'max_depth': 3,
-        'learning_rate': 0.1,
-    }
+        assert input_tensor.shape[1] == 8, "Input tensor must have shape (batch_size, 8)"
+        
+        if input_tensor.is_cuda:
+            device = input_tensor.device
+            input_np = input_tensor.detach().cpu().numpy()
+        else:
+            device = input_tensor.device
+            input_np = input_tensor.detach().numpy()
+        
+        predictions = self.model.predict(input_np)
+        predictions_tensor = torch.tensor(predictions, dtype=torch.float32, device=device, requires_grad=True)
+    
+        return predictions_tensor
+    
+    def save_model(self):
+        self.model.save_model(self.model_save_path)
 
-    model = xgb.train(params, dtrain)
 
-    predictions = []
-    for row in xg_f[:, -1, :-1]:
-        prediction = model.predict(xgb.DMatrix(row.reshape(1, -1)))
-        predictions.append(prediction[0])
-
-    predictions_tensor = torch.tensor(predictions, dtype=torch.float32).to(device)
-
-    return predictions_tensor

@@ -1,84 +1,128 @@
-import torch 
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.optim as optim
+
+import xgboost as xgb
+import numpy as np
+
+class AttentionModel(nn.Module):
+    def __init__(self, feature_dims=10, time_steps=15, lstm_units=128, num_heads=8):
+        super(AttentionModel, self).__init__()
+        
+        # Conv1D equivalent in PyTorch
+        self.conv1d = nn.Conv1d(in_channels=feature_dims, 
+                                out_channels=64, 
+                                kernel_size=1)
+        
+        self.dropout = nn.Dropout(0.5)
+
+        self.bilstm = nn.LSTM(input_size=64, 
+                              hidden_size=lstm_units, 
+                              batch_first=True, 
+                              bidirectional=True)
+        
+        self.attention_block = AttentionBlock(input_dim=2*lstm_units, time_steps=time_steps, single_attention_vector=True, num_heads=num_heads)
+        self.fc1 = nn.Linear(lstm_units*2, lstm_units)  # lstm_units * 2 because it's bidirectional
+        self.bn1 = nn.BatchNorm1d(lstm_units)
+        self.fc2 = nn.Linear(lstm_units, 8)
+        self.bn2 = nn.BatchNorm1d(8)            
+        self.fc3 = nn.Linear(8, 1)
+        self.final = nn.Linear(2, 1)
 
 
-class FeatureEmbeddingNN(nn.Module):
-    def __init__(self, input_dim, embedding_dim):
-        super(FeatureEmbeddingNN, self).__init__()
-        self.fc1 = nn.Linear(input_dim, embedding_dim*2)
-        self.fc2 = nn.Linear(embedding_dim*2, embedding_dim)
-    
+    def forward(self, features, features_xg):
+
+        y_xgb = train_and_predict_xgboost(features_xg)
+
+        x = features.permute(0, 2, 1)  # Rearrange to (batch_size, INPUT_DIMS, TIME_STEPS)
+        x = F.relu(self.conv1d(x))
+        x = self.dropout(x)
+        
+        # Rearrange back to (batch_size, time_steps, conv_output_channels)
+        x = x.permute(0, 2, 1)
+        
+        # BiLSTM expects input shape (batch_size, time_steps, features)
+        lstm_out, _ = self.bilstm(x)
+        lstm_out = self.dropout(lstm_out)
+
+        attention_out = self.attention_block(lstm_out)
+
+        att_pooled, _ = torch.max(attention_out, dim=1)
+
+        output = torch.sigmoid(self.bn1(self.fc1(att_pooled)))
+
+        output = torch.sigmoid(self.bn2(self.fc2(output))) 
+
+        output = self.fc3(output) 
+
+        output = torch.cat((output, y_xgb.unsqueeze(1)), dim=1)
+
+        output = self.final(output)
+        
+        return output
+
+
+class AttentionBlock(nn.Module):
+    def __init__(self, input_dim, time_steps, single_attention_vector=False, num_heads=8):
+        super(AttentionBlock, self).__init__()
+        self.single_attention_vector = single_attention_vector
+        
+        self.multihead_attention = nn.MultiheadAttention(embed_dim=input_dim, num_heads=num_heads, batch_first=True)
+        
+        self.fc = nn.Linear(input_dim, time_steps)
+        
+        if single_attention_vector:
+            self.attention_fc = nn.Linear(time_steps, input_dim)
+        
     def forward(self, x):
-        x = torch.relu(self.fc1(x))
-        x = torch.relu(self.fc2(x))
-        return x
+        # x.shape: (batch_size, time_steps, input_dim)
+        
+        # Multi-head attention
+        attn_output, _ = self.multihead_attention(x, x, x)
+        
+        # Compute attention weights
+        attention_weights = self.fc(attn_output)
+        attention_weights = F.softmax(attention_weights, dim=1)
+        
+        if self.single_attention_vector:
+            # Average across time steps
+            attention_weights = attention_weights.mean(dim=1)
+            attention_weights = attention_weights.unsqueeze(1).repeat(1, x.size(1), 1)
+        
+        # Apply attention weights
+        attention_weights = attention_weights.permute(0, 2, 1)
+        output_attention_mul = torch.bmm(attention_weights, x)
 
-class NO2Model(nn.Module):
-    def __init__(self, embedding_dim, hidden_dim, num_layers, fc_out_dim):
-        super(NO2Model, self).__init__()
-        
-        # Define embedding networks for each feature
-        self.lst_embedding = FeatureEmbeddingNN(1, embedding_dim)
-        self.aai_embedding = FeatureEmbeddingNN(1, embedding_dim)
-        self.cloud_fraction_embedding = FeatureEmbeddingNN(1, embedding_dim)
-        self.precipitation_embedding = FeatureEmbeddingNN(1, embedding_dim)
-        self.tropopause_pressure_embedding = FeatureEmbeddingNN(1, embedding_dim)
-        
-        # LSTM
-        self.lstm = nn.LSTM(embedding_dim * 5, hidden_dim, num_layers, batch_first=True)
-        
-        # Final FCNN
-        self.fc1 = nn.Linear(hidden_dim + 2, fc_out_dim)  # +2 for LAT and LON
-        self.fc2 = nn.Linear(fc_out_dim, 1)  # Output layer
-    
-    def forward(self, lst_seq, aai_seq, cloud_fraction_seq, precipitation_seq, tropopause_pressure_seq, lat, lon):
-        # Apply embeddings
-        lst_embedded = self.lst_embedding(lst_seq)
-        aai_embedded = self.aai_embedding(aai_seq)
-        cloud_fraction_embedded = self.cloud_fraction_embedding(cloud_fraction_seq)
-        precip_embedded = self.precipitation_embedding(precipitation_seq)
-        tropopause_pressure_embedded = self.tropopause_pressure_embedding(tropopause_pressure_seq)
-        
-        # Concatenate embeddings
-        embedded_seq = torch.cat((lst_embedded, aai_embedded, cloud_fraction_embedded, precip_embedded, tropopause_pressure_embedded), dim=-1)
-        
-        # Pass through LSTM
-        lstm_out, _ = self.lstm(embedded_seq)
-        lstm_out = lstm_out[:, -1, :]  # Take the output from the last time step
-        
-        # Concatenate LSTM output with LAT and LON
-        lat_lon = torch.cat((lat.unsqueeze(1), lon.unsqueeze(1)), dim=1)
-        combined = torch.cat((lstm_out, lat_lon), dim=1)
-        
-        x = torch.relu(self.fc1(combined))
-        out = self.fc2(x)
-        
-        return out
-    
+        return output_attention_mul
 
-class RMSLoss(nn.Module):
-    def __init__(self):
-        super(RMSLoss, self).__init__()
-    
-    def forward(self, predictions, targets):
-        # Compute Mean Squared Error (MSE)
-        mse = torch.mean((predictions - targets) ** 2)
-        # Return the square root of MSE
-        rms = torch.sqrt(mse)
-        return rms
-    
-# Model parameters
-embedding_dim = 16  # Dimension for feature embeddings
-hidden_dim = 64
-num_layers = 2
-fc_out_dim = 32
 
-# Instantiate model, loss function, and optimizer
-model = NO2Model(embedding_dim, hidden_dim, num_layers, fc_out_dim)
-criterion = RMSLoss()
-optimizer = optim.Adam(model.parameters(), lr=0.001)
+def train_and_predict_xgboost(xg_f):
+    if xg_f.is_cuda:
+        device = xg_f.device
+        xg_f = xg_f.detach().cpu().numpy()
+    else:
+        device = xg_f.device
+        xg_f = xg_f.detach().numpy()
 
-# Training loop
-num_epochs = 50
+    X_train = xg_f[:, :-1, :-1].reshape(-1, xg_f.shape[-1] - 1)
+    y_train = xg_f[:, :-1, -1].flatten()
+
+    dtrain = xgb.DMatrix(X_train, label=y_train)
+
+    params = {
+        'objective': 'reg:squarederror',
+        'eval_metric': 'rmse',
+        'max_depth': 3,
+        'learning_rate': 0.1,
+    }
+
+    model = xgb.train(params, dtrain)
+
+    predictions = []
+    for row in xg_f[:, -1, :-1]:
+        prediction = model.predict(xgb.DMatrix(row.reshape(1, -1)))
+        predictions.append(prediction[0])
+
+    predictions_tensor = torch.tensor(predictions, dtype=torch.float32).to(device)
+
+    return predictions_tensor
