@@ -10,7 +10,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader, random_split
 
-from sklearn.metrics import mean_squared_error
+import xgboost as xgb
 
 from model import *
 
@@ -158,11 +158,10 @@ def train_one_epoch(epoch_index, model, criterion, optimizer):
     all_preds = np.concatenate(all_preds)
     xg_features = np.concatenate(xg_features)
     
-
-    x_xgb = np.concatenate((xg_features, all_preds), axis=1)
+    x_xgb = xg_features
     y_xgb = np.concatenate(all_gts)
 
-    return losses, x_xgb, y_xgb
+    return losses, x_xgb, y_xgb, all_preds
 
 
 def validate_one_epoch(epoch_index, model, criterion):
@@ -195,13 +194,14 @@ def validate_one_epoch(epoch_index, model, criterion):
     xg_features = np.concatenate(xg_features)
     all_preds = np.concatenate(all_preds)
 
-    x_xgb = np.concatenate((xg_features, all_preds), axis=1)
+    x_xgb = xg_features
     y_xgb = np.concatenate(all_gts)
     
-    return losses, x_xgb, y_xgb
+    return losses, x_xgb, y_xgb, all_preds
 
 
 dataset = pd.read_csv('Train_Cleaned_KNN_Filtered.csv')
+dataset = dataset.sample(frac=0.05)
 
 batch_size = 128
 
@@ -235,34 +235,65 @@ best_val_loss = float('inf')
 all_train_losses = []
 all_val_losses = []
 
-xgb = XGBoostModel(best_val_loss)
+xgb = xgb.XGBRegressor(
+            objective='reg:squarederror',
+            n_estimators=150,  
+            max_depth=7        
+        )
+final_xgb = xgb.XGBRegressor(
+            objective='reg:squarederror',
+            n_estimators=150,  
+            max_depth=7       
+        )
 
 for epoch in tqdm(range(1, num_epochs + 1)):
 
-    train_losses, input_xgb, output_xgb = train_one_epoch(epoch, model, criterion, optimizer)
+    train_losses, input_xgb, output_xgb, predictions = train_one_epoch(epoch, model, criterion, optimizer)
 
     print(f"Average Training Loss for {epoch}: ", sum(train_losses)/len(train_losses))
 
+    print(f"input xgb shape: {input_xgb.shape}, output xgb shape: {output_xgb.shape}")
+
     xgb.fit(input_xgb, output_xgb)
+
+    prediction = xgb.predict(input_xgb)
+
+    print(f"shape of prediction: {prediction.shape} and predictions {predictions.shape}")
+
+    final = np.concatenate((predictions, prediction), axis=1)
+
+    print(f"final shape: {final.shape}, output xgb shape: {output_xgb.shape}")
+
+    final_xgb.fit(final, output_xgb)
+
     if epoch == 1:
         xgb.save_model()
+        final_xgb.save_model()
 
-    prediction = xgb.inference(input_xgb)
+    prediction = final_xgb.predict(final)
+
+    train_rmse = np.sqrt(np.mean((prediction - output_xgb) ** 2))
+
     
     all_train_losses.extend(train_losses)
     print(f'||||||||||||||||||||||||Epoch {epoch} Training Completed.||||||||||||||||||||||||')
 
     # Validate after each epoch
-    val_losses, input_xgb, output_xgb = validate_one_epoch(epoch, model, criterion)  
+    val_losses, input_xgb, output_xgb, predictions = validate_one_epoch(epoch, model, criterion)  
     all_val_losses.extend(val_losses)
     print(f"Average Validation Loss for {epoch}: ", sum(val_losses)/len(val_losses))
 
     prediction = xgb.inference(input_xgb)
 
+    final = np.concatenate((predictions, prediction), axis=1)
+
+    prediction = final_xgb.inference(final)
+
     val_rmse = np.sqrt(np.mean((prediction - output_xgb) ** 2))
 
     if val_rmse < best_val_loss:
         xgb.save_model()
+        final_xgb.save_model()
         torch.save(model.state_dict(), './trained-model-xgboost/best_Att-CNN-LSTM_model_22.pt')
         print(f'Best Model saved at epoch {epoch} with validation RMSE {val_rmse:.4f}')
         best_val_loss = val_rmse

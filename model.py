@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import xgboost as xgb
+from sklearn.model_selection import GridSearchCV
 import numpy as np
 
 class AttentionModel(nn.Module):
@@ -88,11 +89,11 @@ class AttentionBlock(nn.Module):
 
 
 class XGBoostModel:
-    def __init__(self,best_loss = float('inf'), model_save_path="xgboost-weights/best_xgboost_model.json"):
+    def __init__(self,best_loss = float('inf'), model_save_path="xgboost-weights/best_xgboost_model.json", n_estimators=150, max_depth=7):
         self.model = xgb.XGBRegressor(
             objective='reg:squarederror',
-            n_estimators=1000,  # Set n_estimators to 100
-            max_depth=10        # Set max_depth to 5
+            n_estimators=n_estimators,  
+            max_depth=max_depth        
         )
         self.best_loss = best_loss
         self.model_save_path = model_save_path
@@ -108,10 +109,8 @@ class XGBoostModel:
 
         if isinstance(input_tensor, torch.Tensor):
             if input_tensor.is_cuda:
-                device = input_tensor.device
                 input_np = input_tensor.detach().cpu().numpy()
             else:
-                device = input_tensor.device
                 input_np = input_tensor.detach().numpy()
         else:
             input_np = input_tensor
@@ -121,7 +120,33 @@ class XGBoostModel:
     
         return predictions
     
-    def save_model(self):
-        self.model.save_model(self.model_save_path)
+    def save_model(self, model = None):
+        if model:
+            model.save_model(self.model_save_path)
+        else:
+            self.model.save_model(self.model_save_path)
+
+    
+    def gridsearch_exp(self, X_train, y_train, X_test, y_test, param_grid):
+        grid_search = GridSearchCV(estimator=self.model, param_grid=param_grid, scoring='neg_mean_squared_error', cv=3)
+        grid_search.fit(X_train, y_train)
+        
+        best_model = grid_search.best_estimator_
+        best_model.save_model('exp_xgboost_model.json')
+
+        print("Best model parameters:")
+        print(f"n_estimators: {best_model.n_estimators}")
+        print(f"max_depth: {best_model.max_depth}")
+        print(f"learning_rate: {best_model.learning_rate}")
+        print(f"subsample: {best_model.subsample}")
+        print(f"colsample_bytree: {best_model.colsample_bytree}")
+        print(f"gamma: {best_model.gamma}")
+        
+        y_pred = best_model.predict(X_test)
+        
+        rmse = np.sqrt(np.mean(np.square(y_test - y_pred)))
+        print(f"RMSE: {rmse}")
+
+        return best_model
 
 
